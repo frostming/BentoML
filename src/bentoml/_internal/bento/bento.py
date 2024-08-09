@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from _bentoml_sdk import Service as NewService
     from _bentoml_sdk.service import ServiceConfig
 
-    from ..models import Model
+    from ..models import Model as StoredModel
     from ..service import Service
     from ..service.inference_api import InferenceAPI
 else:
@@ -182,8 +182,9 @@ class Bento(StoreItem):
         build_config: BentoBuildConfig,
         version: t.Optional[str] = None,
         build_ctx: t.Optional[str] = None,
-        model_store: ModelStore = Provide[BentoMLContainer.model_store],
     ) -> Bento:
+        from _bentoml_sdk.models import BentoModel
+
         from ..service import Service
         from ..service.loader import import_service
 
@@ -230,23 +231,20 @@ class Bento(StoreItem):
         bento_fs = fs.open_fs(f"temp://bentoml_bento_{bento_name}")
         ctx_fs = fs.open_fs(encode_path_for_uri(build_ctx))
 
-        models: t.Set[Model] = set()
-        resolved_aliases: t.Dict[Tag, str] = {}
+        models: t.Set[BentoModelInfo] = set()
         if build_config.models:
             for model_spec in build_config.models:
-                model = model_store.get(model_spec.tag)
-                models.add(model)
-                if model_spec.alias:
-                    resolved_aliases[model.tag] = model_spec.alias
+                model = BentoModel(model_spec.tag)
+                models.add(model.to_info(model_spec.alias))
         elif is_legacy:
             # XXX: legacy way to get models from service
             # Add all models required by the service
             for model in svc.models:
-                models.add(model)
+                models.add(BentoModel(model.tag).to_info())
             # Add all models required by service runners
             for runner in svc.runners:
                 for model in runner.models:
-                    models.add(model)
+                    models.add(BentoModel(model.tag).to_info())
 
         # create ignore specs
         specs = BentoPathSpec(build_config.include, build_config.exclude)
@@ -313,12 +311,7 @@ class Bento(StoreItem):
                 service=svc,  # type: ignore # attrs converters do not typecheck
                 entry_service=svc.name,
                 labels=build_config.labels,
-                models=[
-                    BentoModelInfo.from_bento_model(
-                        m, alias=resolved_aliases.get(m.tag)
-                    )
-                    for m in models
-                ],
+                models=models,
                 runners=(
                     [BentoRunnerInfo.from_runner(r) for r in svc.runners]  # type: ignore # attrs converters do not typecheck
                     if is_legacy
@@ -388,13 +381,17 @@ class Bento(StoreItem):
         params: t.Optional[t.Dict[str, str]] = None,
         subpath: t.Optional[str] = None,
     ) -> str:
+        from _bentoml_sdk.models import BentoModel
+
         # copy the models to fs
         models_dir = self._fs.makedir("models", recreate=True)
         model_store = ModelStore(models_dir)
         global_model_store = BentoMLContainer.model_store.get()
         for model in self.info.all_models:
+            if model.registry != "bentoml":
+                continue
             copy_model(
-                model.tag,
+                BentoModel(model.tag).resolve().tag,
                 src_model_store=global_model_store,
                 target_model_store=model_store,
             )
@@ -520,16 +517,6 @@ class BentoRunnerInfo:
             resource_config=r.resource_config,
         )
 
-    @classmethod
-    def from_dependency(cls, d: NewService[t.Any]) -> BentoRunnerInfo:
-        return cls(
-            name=d.name,
-            runnable_type=d.name,
-            embedded=False,
-            models=[str(model.tag) for model in d.models],
-            resource_config=d.config.get("resources"),
-        )
-
 
 @attr.frozen
 class BentoApiInfo:
@@ -549,13 +536,16 @@ class BentoApiInfo:
 @attr.frozen
 class BentoModelInfo:
     tag: Tag = attr.field(converter=Tag.from_taglike)
-    module: str
-    creation_time: datetime
-    alias: t.Optional[str] = None
+    module: t.Optional[str] = attr.field(default=None, eq=False)
+    creation_time: datetime = attr.field(
+        factory=lambda: datetime.now(timezone.utc), eq=False
+    )
+    alias: t.Optional[str] = attr.field(default=None, eq=False)
+    registry: str = attr.field(default="bentoml", eq=False)
 
     @classmethod
     def from_bento_model(
-        cls, bento_model: Model, alias: str | None = None
+        cls, bento_model: StoredModel, alias: str | None = None
     ) -> BentoModelInfo:
         return cls(
             tag=bento_model.tag,
@@ -578,7 +568,7 @@ class BentoServiceInfo:
         return cls(
             name=svc.name,
             service="",
-            models=[BentoModelInfo.from_bento_model(m) for m in svc.models],
+            models=[m.to_info() for m in svc.models],
             dependencies=[d.on.name for d in svc.dependencies.values()],
             config=svc.config,
         )
@@ -710,7 +700,10 @@ bentoml_cattr.register_structure_hook_func(
 bentoml_cattr.register_unstructure_hook(
     BentoModelInfo,
     make_dict_unstructure_fn(
-        BentoModelInfo, bentoml_cattr, alias=override(omit_if_default=True)
+        BentoModelInfo,
+        bentoml_cattr,
+        alias=override(omit_if_default=True),
+        registry=override(omit_if_default=True),
     ),
 )
 bentoml_cattr.register_unstructure_hook(
