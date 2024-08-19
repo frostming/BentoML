@@ -81,9 +81,9 @@ class HuggingFaceModel(Model[str]):
 
     def to_create_schema(self) -> CreateModelSchema:
         context = ModelContext(framework_name="huggingface", framework_versions={})
-        metadata = {"registry": "huggingface"}
-        if self.endpoint is not None:
-            metadata["endpoint"] = self.endpoint
+        endpoint = self.endpoint or "https://huggingface.co"
+        url = f"{endpoint}/{self.tag.name}/tree/{self.revision}"
+        metadata = {"registry": "huggingface", "endpoint": endpoint, "url": url}
         return CreateModelSchema(
             description="",
             version=self.revision,
