@@ -93,7 +93,7 @@ class HuggingFaceModel(Model[str]):
         metadata = {"registry": "huggingface", "endpoint": endpoint, "url": url}
         return CreateModelSchema(
             description="",
-            version=self.revision,
+            version=revision,
             manifest=ModelManifestSchema(
                 module="",
                 metadata=metadata,
